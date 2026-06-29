@@ -333,6 +333,14 @@ private:
             pool->head_dim *
             ggml_type_size(GGML_TYPE_F16);
         void * addr = (char *) pool->device_base + kv_type * kv_type_stride;
+
+        // Each physical block stores K then V contiguously, so the stride
+        // between blocks is 2*kv_type_stride. ggml_new_tensor_4d assigns the
+        // contiguous stride (kv_type_stride); paged_attn reads with
+        // block_stride = 2*kv_type_stride, so the write view must match or every
+        // block past the first lands at the wrong offset (garbled attention).
+        tensor->nb[3] *= 2;
+
         if (ggml_backend_tensor_alloc(buffer, tensor, addr) != GGML_STATUS_SUCCESS) {
             GGML_ABORT("failed to allocate Kapsl external KV tensor");
         }
