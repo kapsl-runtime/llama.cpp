@@ -1691,22 +1691,31 @@ extern "C" {
     // `pool` layout is [head_dim, block_size, n_kv_heads, n_blocks].
     // `cur` layout is [head_dim, n_kv_heads, n_tokens].
     // `positions` layout is [n_tokens] and stores logical token positions.
-    // `block_table` layout is [block_table_layer_stride, n_layers].
+    // `block_table` layout is [block_table_layer_stride, n_layers] for a single
+    // sequence, or [block_table_layer_stride, n_layers * n_seq] when batching
+    // multiple sequences. `seq_slot` (optional, [n_tokens], i32) selects each
+    // token's sequence slice via `block_table_seq_stride`; pass NULL and a zero
+    // stride for the single-sequence case.
     GGML_API struct ggml_tensor * ggml_kapsl_kv_write(
             struct ggml_context * ctx,
             struct ggml_tensor  * pool,
             struct ggml_tensor  * cur,
             struct ggml_tensor  * positions,
             struct ggml_tensor  * block_table,
+            struct ggml_tensor  * seq_slot,
             int32_t               layer_id,
             int32_t               block_size,
-            int32_t               block_table_layer_stride);
+            int32_t               block_table_layer_stride,
+            int32_t               block_table_seq_stride);
 
     // Naive correctness-first paged attention over a Kapsl-owned KV pool.
     // `q` layout is [head_dim, n_q_heads, n_tokens].
     // `kv_pool` layout is the raw Kapsl pool storage.
     // `positions` layout is [n_tokens] and stores logical token positions.
-    // `block_table` layout is [block_table_layer_stride, n_layers].
+    // `block_table` layout is [block_table_layer_stride, n_layers] (single seq)
+    // or [block_table_layer_stride, n_layers * n_seq] (multi-seq). `seq_slot`
+    // (optional, [n_tokens], i32) + `block_table_seq_stride` select each token's
+    // sequence slice; pass NULL and a zero stride for the single-sequence case.
     // Result layout is [head_dim, n_q_heads, n_tokens].
     GGML_API struct ggml_tensor * ggml_kapsl_paged_attn(
             struct ggml_context * ctx,
@@ -1714,9 +1723,11 @@ extern "C" {
             struct ggml_tensor  * kv_pool,
             struct ggml_tensor  * positions,
             struct ggml_tensor  * block_table,
+            struct ggml_tensor  * seq_slot,
             int32_t               layer_id,
             int32_t               block_size,
             int32_t               block_table_layer_stride,
+            int32_t               block_table_seq_stride,
             int32_t               n_kv_heads,
             float                 scale);
 

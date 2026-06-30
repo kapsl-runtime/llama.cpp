@@ -32,9 +32,11 @@ static __global__ void kapsl_kv_write_kernel(
         const src_t * __restrict__ cur,
         const pos_t * __restrict__ positions,
         const int   * __restrict__ block_table,
+        const int   * __restrict__ seq_slot,
         int32_t layer_id,
         int32_t block_size,
         int32_t block_table_layer_stride,
+        int32_t block_table_seq_stride,
         int64_t head_dim,
         int64_t n_heads,
         int64_t n_tokens,
@@ -58,9 +60,14 @@ static __global__ void kapsl_kv_write_kernel(
         return;
     }
 
+    // Each sequence owns a contiguous [n_layers * layer_stride] slice of the
+    // combined block table; seq_slot selects it. Single-sequence callers pass a
+    // null seq_slot / zero seq_stride and fall back to offset 0 (unchanged).
+    const int64_t seq_off = seq_slot ? (int64_t) seq_slot[token] * block_table_seq_stride : 0;
+
     const int64_t logical_block = pos / block_size;
     const int64_t pos_in_block  = pos - logical_block * block_size;
-    const int64_t phys_block    = block_table[layer_id * block_table_layer_stride + logical_block];
+    const int64_t phys_block    = block_table[seq_off + layer_id * block_table_layer_stride + logical_block];
 
     const int64_t src_off = d * cur_nb0 + head * cur_nb1 + token * cur_nb2;
     const int64_t dst_off = d * pool_nb0 + pos_in_block * pool_nb1 + head * pool_nb2 + phys_block * pool_nb3;
@@ -73,10 +80,12 @@ static void kapsl_kv_write_cuda(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const ggml_tensor * cur         = dst->src[0];
     const ggml_tensor * positions   = dst->src[1];
     const ggml_tensor * block_table = dst->src[2];
+    const ggml_tensor * seq_slot    = dst->src[4];
 
     const int32_t layer_id                 = ggml_get_op_params_i32(dst, 0);
     const int32_t block_size               = ggml_get_op_params_i32(dst, 1);
     const int32_t block_table_layer_stride = ggml_get_op_params_i32(dst, 2);
+    const int32_t block_table_seq_stride   = ggml_get_op_params_i32(dst, 3);
 
     const int64_t head_dim = cur->ne[0];
     const int64_t n_heads  = cur->ne[1];
@@ -91,9 +100,11 @@ static void kapsl_kv_write_cuda(ggml_backend_cuda_context & ctx, ggml_tensor * d
                 (const src_t *) cur->data,
                 (const pos_t *) positions->data,
                 (const int *) block_table->data,
+                seq_slot ? (const int *) seq_slot->data : nullptr,
                 layer_id,
                 block_size,
                 block_table_layer_stride,
+                block_table_seq_stride,
                 head_dim,
                 n_heads,
                 n_tokens,
@@ -146,9 +157,11 @@ static __global__ void kapsl_paged_attn_kernel(
         const half * __restrict__ kv_pool,
         const pos_t * __restrict__ positions,
         const int * __restrict__ block_table,
+        const int * __restrict__ seq_slot,
         int32_t layer_id,
         int32_t block_size,
         int32_t block_table_layer_stride,
+        int32_t block_table_seq_stride,
         int32_t n_kv_heads,
         float scale,
         int64_t head_dim,
@@ -174,7 +187,10 @@ static __global__ void kapsl_paged_attn_kernel(
     const int64_t kv_type_stride = n_kv_heads * kv_head_stride;
     const int64_t block_stride   = 2 * kv_type_stride;
 
-    const int * bt = block_table + layer_id * block_table_layer_stride;
+    // Select this token's sequence slice of the combined block table; a null
+    // seq_slot / zero seq_stride keeps the single-sequence offset of 0.
+    const int64_t seq_off = seq_slot ? (int64_t) seq_slot[token] * block_table_seq_stride : 0;
+    const int * bt = block_table + seq_off + layer_id * block_table_layer_stride;
 
     // Dynamic shared memory: head_dim floats of query + one tile of scores.
     extern __shared__ float smem[];
@@ -297,11 +313,13 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
     const ggml_tensor * kv_pool     = dst->src[1];
     const ggml_tensor * positions   = dst->src[2];
     const ggml_tensor * block_table = dst->src[3];
+    const ggml_tensor * seq_slot    = dst->src[4];
 
     const int32_t layer_id                 = ggml_get_op_params_i32(dst, 0);
     const int32_t block_size               = ggml_get_op_params_i32(dst, 1);
     const int32_t block_table_layer_stride = ggml_get_op_params_i32(dst, 2);
     const int32_t n_kv_heads               = ggml_get_op_params_i32(dst, 3);
+    const int32_t block_table_seq_stride   = ggml_get_op_params_i32(dst, 5);
     const float scale                      = ggml_get_op_params_f32(dst, 4);
 
     const int64_t head_dim = q->ne[0];
@@ -321,9 +339,11 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
                 (const half *) kv_pool->data,
                 (const pos_t *) positions->data,
                 (const int *) block_table->data,
+                seq_slot ? (const int *) seq_slot->data : nullptr,
                 layer_id,
                 block_size,
                 block_table_layer_stride,
+                block_table_seq_stride,
                 n_kv_heads,
                 scale,
                 head_dim,

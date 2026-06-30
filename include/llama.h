@@ -88,11 +88,21 @@ extern "C" {
         void * device_base;
 
         // Device-side physical block table for the active llama context.
-        // Layout: [n_layers, max_blocks_per_seq], with layer stride in u32s.
+        // Single sequence layout: [n_layers, max_blocks_per_seq], layer stride
+        // in u32s. Multi-sequence layout: [n_seq_slots, n_layers,
+        // max_blocks_per_seq]; a token's slice starts at seq_slot *
+        // block_table_seq_stride.
         uint32_t * block_table_device;
         uint32_t block_table_layer_stride;
         uint32_t n_layers;
         uint32_t max_blocks_per_seq;
+
+        // Multi-sequence combined block table geometry. block_table_seq_stride
+        // is n_layers * block_table_layer_stride (u32s per sequence slot);
+        // n_seq_slots is the number of concurrent sequence slots the combined
+        // table holds. Both are 0 when multi-sequence batching is unavailable.
+        uint32_t block_table_seq_stride;
+        uint32_t n_seq_slots;
 
         // Stable u64 fingerprint of the model (architecture + weights identity).
         // Used as the namespace for prefix-cache hash lookups.  Set by the Rust
@@ -104,6 +114,19 @@ extern "C" {
         bool (*reserve)(
                 void * user_data,
                 uint64_t session_id,
+                uint32_t tokens_needed,
+                uint32_t ** block_table_device_out,
+                uint32_t * n_blocks_out);
+
+        // Multi-sequence reservation: reserve (grow-only, persistent) blocks for
+        // ONE sequence slot identified by seq_id, writing them into the pool's
+        // combined block table. Returns the combined table device pointer (shared
+        // across all slots) via block_table_device_out. Called once per distinct
+        // sequence in a multi-sequence decode batch. NULL when the pool cannot
+        // batch sequences (then n_seq_slots / block_table_seq_stride are 0).
+        bool (*reserve_seq)(
+                void * user_data,
+                uint64_t seq_id,
                 uint32_t tokens_needed,
                 uint32_t ** block_table_device_out,
                 uint32_t * n_blocks_out);
