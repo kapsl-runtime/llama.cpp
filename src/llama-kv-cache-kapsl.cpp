@@ -177,6 +177,11 @@ public:
     }
 
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const override {
+        // Join this graph's per-graph tensor cache so seq_slot_input is tied to
+        // the live context (rebuilt below when a new graph cleared it). Safe
+        // regardless of whether the pool tensors were already built this graph:
+        // reset_graph_cache() is a no-op once cached_graph_ctx == ctx.
+        reset_graph_cache(ctx);
         ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, ubatch.n_tokens);
         ggml_set_input(positions);
         ggml_set_name(positions, "kapsl_k_pos");
@@ -320,6 +325,11 @@ private:
         cached_pool_tensor[1]     = nullptr;
         cached_pool_base_tensor   = nullptr;
         cached_block_table_tensor = nullptr;
+        // seq_slot_input is also a per-graph input tensor: it is sized to the
+        // build's ubatch.n_tokens. It must be rebuilt for every new graph or a
+        // later ubatch with a different token count trips the ne[0] == n_tokens
+        // assert in set_input_seq_slot().
+        seq_slot_input            = nullptr;
     }
 
     ggml_tensor * make_pool_tensor(ggml_context * ctx, uint32_t kv_type) const {
