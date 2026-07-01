@@ -11,6 +11,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
@@ -63,11 +64,13 @@ public:
             llama_memory_status status,
             llama_kapsl_kv_pool_desc * pool,
             uint32_t n_kv,
-            std::vector<llama_ubatch> ubatches = {}) :
+            std::vector<llama_ubatch> ubatches = {},
+            bool multi_seq = false) :
         status(status),
         pool(pool),
         n_kv(n_kv),
-        ubatches(std::move(ubatches)) {
+        ubatches(std::move(ubatches)),
+        multi_seq(multi_seq) {
     }
 
     ~llama_kv_cache_kapsl_context() override {
@@ -131,9 +134,11 @@ public:
                 k_cur,
                 k_idxs,
                 make_block_table_tensor(ctx),
+                multi_seq ? seq_slot_input : nullptr,
                 il,
                 (int32_t) pool->block_size,
-                (int32_t) pool->block_table_layer_stride);
+                (int32_t) pool->block_table_layer_stride,
+                multi_seq ? (int32_t) pool->block_table_seq_stride : 0);
     }
 
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const override {
@@ -143,9 +148,11 @@ public:
                 v_cur,
                 v_idxs,
                 make_block_table_tensor(ctx),
+                multi_seq ? seq_slot_input : nullptr,
                 il,
                 (int32_t) pool->block_size,
-                (int32_t) pool->block_table_layer_stride);
+                (int32_t) pool->block_table_layer_stride,
+                multi_seq ? (int32_t) pool->block_table_seq_stride : 0);
     }
 
     ggml_tensor * paged_attn(
@@ -160,17 +167,31 @@ public:
                 make_pool_base_tensor(ctx),
                 positions,
                 make_block_table_tensor(ctx),
+                multi_seq ? seq_slot_input : nullptr,
                 il,
                 (int32_t) pool->block_size,
                 (int32_t) pool->block_table_layer_stride,
+                multi_seq ? (int32_t) pool->block_table_seq_stride : 0,
                 (int32_t) pool->num_kv_heads,
                 scale);
     }
 
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const override {
+        // Join this graph's per-graph tensor cache so seq_slot_input is tied to
+        // the live context (rebuilt below when a new graph cleared it). Safe
+        // regardless of whether the pool tensors were already built this graph:
+        // reset_graph_cache() is a no-op once cached_graph_ctx == ctx.
+        reset_graph_cache(ctx);
         ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, ubatch.n_tokens);
         ggml_set_input(positions);
         ggml_set_name(positions, "kapsl_k_pos");
+        // Build the per-token sequence-slot selector once per graph; cpy_k,
+        // cpy_v and paged_attn all reference it. Filled in set_input_seq_slot().
+        if (multi_seq && seq_slot_input == nullptr) {
+            seq_slot_input = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, ubatch.n_tokens);
+            ggml_set_input(seq_slot_input);
+            ggml_set_name(seq_slot_input, "kapsl_seq_slot");
+        }
         return positions;
     }
 
@@ -191,10 +212,12 @@ public:
 
     void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const override {
         set_input_positions(dst, ubatch);
+        set_input_seq_slot(ubatch);
     }
 
     void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const override {
         set_input_positions(dst, ubatch);
+        set_input_seq_slot(ubatch);
     }
 
     void set_input_k_shift(ggml_tensor *) const override {
@@ -302,6 +325,11 @@ private:
         cached_pool_tensor[1]     = nullptr;
         cached_pool_base_tensor   = nullptr;
         cached_block_table_tensor = nullptr;
+        // seq_slot_input is also a per-graph input tensor: it is sized to the
+        // build's ubatch.n_tokens. It must be rebuilt for every new graph or a
+        // later ubatch with a different token count trips the ne[0] == n_tokens
+        // assert in set_input_seq_slot().
+        seq_slot_input            = nullptr;
     }
 
     ggml_tensor * make_pool_tensor(ggml_context * ctx, uint32_t kv_type) const {
@@ -333,6 +361,14 @@ private:
             pool->head_dim *
             ggml_type_size(GGML_TYPE_F16);
         void * addr = (char *) pool->device_base + kv_type * kv_type_stride;
+
+        // Each physical block stores K then V contiguously, so the stride
+        // between blocks is 2*kv_type_stride. ggml_new_tensor_4d assigns the
+        // contiguous stride (kv_type_stride); paged_attn reads with
+        // block_stride = 2*kv_type_stride, so the write view must match or every
+        // block past the first lands at the wrong offset (garbled attention).
+        tensor->nb[3] *= 2;
+
         if (ggml_backend_tensor_alloc(buffer, tensor, addr) != GGML_STATUS_SUCCESS) {
             GGML_ABORT("failed to allocate Kapsl external KV tensor");
         }
@@ -381,11 +417,15 @@ private:
         ggml_backend_buffer_t buffer = ensure_block_table_buffer();
         GGML_ASSERT(block_table_buffer_ptr != nullptr);
 
+        // In multi-sequence mode the table spans every sequence slot:
+        // [stride, n_layers * n_seq_slots]. seq_slot * block_table_seq_stride
+        // selects a slot inside the kernels.
+        const int64_t n_slots = multi_seq ? (int64_t) pool->n_seq_slots : 1;
         ggml_tensor * tensor = ggml_new_tensor_2d(
                 ctx,
                 GGML_TYPE_I32,
                 pool->block_table_layer_stride,
-                pool->n_layers);
+                (int64_t) pool->n_layers * n_slots);
 
         if (ggml_backend_tensor_alloc(buffer, tensor, block_table_buffer_ptr) != GGML_STATUS_SUCCESS) {
             GGML_ABORT("failed to allocate Kapsl external block table tensor");
@@ -396,7 +436,9 @@ private:
     }
 
     size_t block_table_size_bytes() const {
-        return (size_t) pool->n_layers *
+        const size_t n_slots = multi_seq ? (size_t) pool->n_seq_slots : 1;
+        return n_slots *
+            (size_t) pool->n_layers *
             pool->block_table_layer_stride *
             sizeof(uint32_t);
     }
@@ -436,6 +478,26 @@ private:
         }
     }
 
+    // Fill the per-token sequence-slot selector from the ubatch's seq ids. Each
+    // token's slot is its primary sequence id, which the scheduler assigns in
+    // [0, n_seq_slots). No-op outside multi-sequence batches.
+    void set_input_seq_slot(const llama_ubatch * ubatch) const {
+        if (!multi_seq || seq_slot_input == nullptr) {
+            return;
+        }
+        GGML_ASSERT(seq_slot_input->ne[0] == ubatch->n_tokens);
+        GGML_ASSERT(ggml_backend_buffer_is_host(seq_slot_input->buffer));
+        int32_t * data = (int32_t *) seq_slot_input->data;
+        for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+            int32_t slot = 0;
+            if (ubatch->seq_id != nullptr && ubatch->seq_id[i] != nullptr &&
+                ubatch->n_seq_id != nullptr && ubatch->n_seq_id[i] > 0) {
+                slot = (int32_t) ubatch->seq_id[i][0];
+            }
+            data[i] = slot;
+        }
+    }
+
     llama_memory_status status;
     llama_kapsl_kv_pool_desc * pool = nullptr;
     uint32_t n_kv = 0;
@@ -455,6 +517,13 @@ private:
     mutable ggml_tensor * cached_pool_tensor[2] = { nullptr, nullptr };
     mutable ggml_tensor * cached_pool_base_tensor = nullptr;
     mutable ggml_tensor * cached_block_table_tensor = nullptr;
+
+    // Multi-sequence batching: when true, several sequences share one decode
+    // and the kernels select each token's block-table slice via seq_slot_input
+    // (filled in set_input_k_idxs from ubatch->seq_id) and the pool's combined
+    // block table. False keeps the single-sequence path byte-for-byte unchanged.
+    bool multi_seq = false;
+    mutable ggml_tensor * seq_slot_input = nullptr;
 };
 
 } // namespace
@@ -666,6 +735,10 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
     const bool want_prefix = (pool->reserve_prefix != nullptr);
     std::vector<int32_t> token_seq;
 
+    // Per-sequence token counts for multi-sequence batching. Maps each distinct
+    // sequence id present in the batch to its highest position + 1.
+    std::map<llama_seq_id, uint32_t> seq_tokens;
+
     while (true) {
         auto ubatch = balloc.split_simple(n_ubatch);
         if (ubatch.n_tokens == 0) {
@@ -678,6 +751,12 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
             if (pos >= 0) {
                 const uint32_t upos = (uint32_t) pos;
                 tokens_needed = std::max(tokens_needed, upos + 1);
+                if (ubatch.seq_id != nullptr && ubatch.seq_id[i] != nullptr &&
+                    ubatch.n_seq_id != nullptr && ubatch.n_seq_id[i] > 0) {
+                    const llama_seq_id sid = ubatch.seq_id[i][0];
+                    auto & t = seq_tokens[sid];
+                    t = std::max(t, upos + 1);
+                }
                 if (want_prefix && ubatch.token != nullptr) {
                     if (token_seq.size() <= upos) {
                         token_seq.resize(upos + 1, 0);
@@ -693,8 +772,33 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
         return make_status_context(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
     }
 
+    // Multi-sequence batching: when more than one sequence shares this decode
+    // and the pool advertises combined-table support, reserve each sequence's
+    // slot individually. The kernels then select per-token slices via seq_slot.
+    const bool can_multi_seq = pool->reserve_seq != nullptr && pool->n_seq_slots > 0;
+    bool multi_seq_active = false;
+
     bool ok;
-    if (want_prefix && !token_seq.empty() && token_seq.size() == tokens_needed) {
+    if (can_multi_seq && seq_tokens.size() > 1) {
+        ok = true;
+        uint32_t * combined_table = nullptr;
+        for (const auto & [sid, toks] : seq_tokens) {
+            uint32_t n_blocks = 0;
+            if (!pool->reserve_seq(pool->user_data, (uint64_t) sid, toks,
+                                   &combined_table, &n_blocks)) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            multi_seq_active = true;
+            block_table_device = combined_table;
+            pool->block_table_device = combined_table;
+            has_reservation = true;
+            n_reserved_tokens = tokens_needed;
+            last_tokens.clear();
+        }
+    } else if (want_prefix && !token_seq.empty() && token_seq.size() == tokens_needed) {
         ok = reserve_for_tokens_prefix(token_seq);
         if (ok) {
             last_tokens = std::move(token_seq);
@@ -717,7 +821,8 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
             LLAMA_MEMORY_STATUS_SUCCESS,
             pool,
             n_reserved_tokens,
-            std::move(ubatches));
+            std::move(ubatches),
+            multi_seq_active);
 }
 
 llama_memory_context_ptr llama_kv_cache_kapsl::init_full() {
@@ -736,7 +841,13 @@ void llama_kv_cache_kapsl::clear(bool) {
     release_session();
 }
 
-bool llama_kv_cache_kapsl::seq_rm(llama_seq_id, llama_pos, llama_pos) {
+bool llama_kv_cache_kapsl::seq_rm(llama_seq_id seq_id, llama_pos, llama_pos) {
+    // Release this sequence's multi-sequence slot (frees its persistent blocks
+    // and clears its block-table region). No-op in single-sequence mode, where
+    // release_session() below performs the actual release.
+    if (seq_id >= 0 && pool != nullptr && pool->release != nullptr) {
+        pool->release(pool->user_data, (uint64_t) seq_id);
+    }
     release_session();
     return true;
 }

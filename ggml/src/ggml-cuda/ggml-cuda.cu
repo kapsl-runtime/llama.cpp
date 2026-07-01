@@ -3119,6 +3119,14 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
             continue;
         }
 
+        // Kapsl paged KV ops (GGML_OP_KAPSL_KV_WRITE / GGML_OP_KAPSL_PAGED_ATTN) read a
+        // block table whose contents change every step; capturing them in a CUDA graph
+        // replays stale paging and corrupts attention. Disable graphs when present.
+        if (node->op == GGML_OP_KAPSL_KV_WRITE || node->op == GGML_OP_KAPSL_PAGED_ATTN) {
+            use_cuda_graph = false;
+            break;
+        }
+
         if (node->src[0] && node->src[0]->buffer && ggml_backend_buft_is_cuda_split(node->src[0]->buffer->buft)) {
             use_cuda_graph = false; // Split buffers are not supported by CUDA graph capture
 #ifndef NDEBUG

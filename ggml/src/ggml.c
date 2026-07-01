@@ -3936,9 +3936,11 @@ struct ggml_tensor * ggml_kapsl_kv_write(
         struct ggml_tensor  * cur,
         struct ggml_tensor  * positions,
         struct ggml_tensor  * block_table,
+        struct ggml_tensor  * seq_slot,
         int32_t               layer_id,
         int32_t               block_size,
-        int32_t               block_table_layer_stride) {
+        int32_t               block_table_layer_stride,
+        int32_t               block_table_seq_stride) {
     GGML_ASSERT(pool->type == GGML_TYPE_F16);
     GGML_ASSERT(cur->type == GGML_TYPE_F32 || cur->type == GGML_TYPE_F16);
     GGML_ASSERT(positions->type == GGML_TYPE_I32 || positions->type == GGML_TYPE_I64);
@@ -3946,6 +3948,11 @@ struct ggml_tensor * ggml_kapsl_kv_write(
     GGML_ASSERT(layer_id >= 0);
     GGML_ASSERT(block_size > 0);
     GGML_ASSERT(block_table_layer_stride > 0);
+    GGML_ASSERT(block_table_seq_stride >= 0);
+
+    // seq_slot is optional: present for multi-sequence batches, NULL otherwise.
+    GGML_ASSERT(seq_slot == NULL || seq_slot->type == GGML_TYPE_I32);
+    GGML_ASSERT(seq_slot == NULL || seq_slot->ne[0] == cur->ne[2]);
 
     GGML_ASSERT(pool->ne[0] == cur->ne[0]);
     GGML_ASSERT(pool->ne[1] == block_size);
@@ -3958,6 +3965,7 @@ struct ggml_tensor * ggml_kapsl_kv_write(
         layer_id,
         block_size,
         block_table_layer_stride,
+        block_table_seq_stride,
     };
 
     struct ggml_tensor * result = ggml_view_tensor(ctx, pool);
@@ -3969,6 +3977,7 @@ struct ggml_tensor * ggml_kapsl_kv_write(
     result->src[1] = positions;
     result->src[2] = block_table;
     result->src[3] = pool;
+    result->src[4] = seq_slot;
 
     return result;
 }
@@ -3981,9 +3990,11 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
         struct ggml_tensor  * kv_pool,
         struct ggml_tensor  * positions,
         struct ggml_tensor  * block_table,
+        struct ggml_tensor  * seq_slot,
         int32_t               layer_id,
         int32_t               block_size,
         int32_t               block_table_layer_stride,
+        int32_t               block_table_seq_stride,
         int32_t               n_kv_heads,
         float                 scale) {
     GGML_ASSERT(q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16);
@@ -3993,11 +4004,16 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
     GGML_ASSERT(layer_id >= 0);
     GGML_ASSERT(block_size > 0);
     GGML_ASSERT(block_table_layer_stride > 0);
+    GGML_ASSERT(block_table_seq_stride >= 0);
     GGML_ASSERT(n_kv_heads > 0);
     GGML_ASSERT(q->ne[1] % n_kv_heads == 0);
     GGML_ASSERT(positions->ne[0] == q->ne[2]);
     GGML_ASSERT(block_table->ne[0] >= block_table_layer_stride);
     GGML_ASSERT(block_table->ne[1] > layer_id);
+
+    // seq_slot is optional: present for multi-sequence batches, NULL otherwise.
+    GGML_ASSERT(seq_slot == NULL || seq_slot->type == GGML_TYPE_I32);
+    GGML_ASSERT(seq_slot == NULL || seq_slot->ne[0] == q->ne[2]);
 
     int64_t ne[3] = { q->ne[0], q->ne[1], q->ne[2] };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
@@ -4010,12 +4026,14 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
     };
     ggml_set_op_params(result, iparams, sizeof(iparams));
     ggml_set_op_params_f32(result, 4, scale);
+    ggml_set_op_params_i32(result, 5, block_table_seq_stride);
 
     result->op     = GGML_OP_KAPSL_PAGED_ATTN;
     result->src[0] = q;
     result->src[1] = kv_pool;
     result->src[2] = positions;
     result->src[3] = block_table;
+    result->src[4] = seq_slot;
 
     return result;
 }
