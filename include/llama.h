@@ -120,16 +120,24 @@ extern "C" {
 
         // Multi-sequence reservation: reserve (grow-only, persistent) blocks for
         // ONE sequence slot identified by seq_id, writing them into the pool's
-        // combined block table. Returns the combined table device pointer (shared
-        // across all slots) via block_table_device_out. Called once per distinct
-        // sequence in a multi-sequence decode batch. NULL when the pool cannot
-        // batch sequences (then n_seq_slots / block_table_seq_stride are 0).
+        // host-side combined block table. Implementations may return the current
+        // device table pointer via block_table_device_out. Called once per
+        // distinct sequence in a multi-sequence decode batch. NULL when the pool
+        // cannot batch sequences (then n_seq_slots / block_table_seq_stride are 0).
         bool (*reserve_seq)(
                 void * user_data,
                 uint64_t seq_id,
                 uint32_t tokens_needed,
                 uint32_t ** block_table_device_out,
                 uint32_t * n_blocks_out);
+
+        // Commit the host-side combined block table after all reserve_seq calls
+        // for the current batch. This lets the runtime upload once per batch
+        // instead of once per sequence. Optional for older implementations where
+        // reserve_seq already returns a ready device table.
+        bool (*commit_seq)(
+                void * user_data,
+                uint32_t ** block_table_device_out);
 
         void (*release)(
                 void * user_data,
