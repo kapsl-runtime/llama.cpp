@@ -2016,8 +2016,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     }
 
                     if (cparams.kapsl_kv_pool != nullptr) {
-                        GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE);
-
+                        // Sliding-window attention is handled per-layer inside
+                        // llama_kv_cache_kapsl (is_swa/n_swa/swa_type forwarded
+                        // to the paged-attention kernel), so SWA models no longer
+                        // need to fall back off the external pool. Recurrent /
+                        // hybrid and MLA models never reach this pure-attention
+                        // branch (and are filtered before the pool is attached).
                         res = new llama_kv_cache_kapsl(
                                 *this,
                                 params.type_k,

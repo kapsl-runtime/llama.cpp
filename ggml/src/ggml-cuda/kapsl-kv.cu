@@ -26,6 +26,39 @@ __device__ float kapsl_to_float<half>(half v) {
     return __half2float(v);
 }
 
+// Sliding-window attention types — kept in sync with enum llama_swa_type in
+// src/llama-hparams.h (ggml cannot include the llama headers).
+#define KAPSL_SWA_TYPE_NONE      0
+#define KAPSL_SWA_TYPE_STANDARD  1
+#define KAPSL_SWA_TYPE_CHUNKED   2
+#define KAPSL_SWA_TYPE_SYMMETRIC 3
+
+// Whether key position p0 is masked out for query position p1 under a sliding
+// window. Direct port of llama_hparams::is_masked_swa so the paged kernel
+// matches llama.cpp's native cache exactly. n_swa == 0 or an unknown type means
+// no masking (full causal attention, enforced by the caller's ctx_len bound).
+static __device__ __forceinline__ bool kapsl_is_masked_swa(
+        int n_swa, int swa_type, int64_t p0, int64_t p1) {
+    if (n_swa <= 0) {
+        return false;
+    }
+    switch (swa_type) {
+        case KAPSL_SWA_TYPE_STANDARD:
+            return (p1 - p0) >= (int64_t) n_swa;
+        case KAPSL_SWA_TYPE_CHUNKED: {
+            const int64_t pos_chunk_start = (p1 / n_swa) * n_swa;
+            return p0 < pos_chunk_start;
+        }
+        case KAPSL_SWA_TYPE_SYMMETRIC: {
+            const int64_t half_n_swa = n_swa / 2;
+            const int64_t pos_diff   = p1 - p0;
+            return pos_diff < -half_n_swa || pos_diff > half_n_swa;
+        }
+        default:
+            return false;
+    }
+}
+
 template<typename src_t, typename pos_t>
 static __global__ void kapsl_kv_write_kernel(
         half        * __restrict__ pool,
@@ -164,6 +197,8 @@ static __global__ void kapsl_paged_attn_kernel(
         int32_t block_table_seq_stride,
         int32_t n_kv_heads,
         float scale,
+        int32_t n_swa,
+        int32_t swa_type,
         int64_t head_dim,
         int64_t n_q_heads,
         int64_t n_tokens,
@@ -211,7 +246,8 @@ static __global__ void kapsl_paged_attn_kernel(
     float running_max = -3.402823466e+38F;
     float running_sum = 0.0f;
 
-    const int64_t ctx_len = (int64_t) positions[token] + 1;
+    const int64_t query_pos = (int64_t) positions[token];
+    const int64_t ctx_len    = query_pos + 1;
 
     for (int64_t tile_start = 0; tile_start < ctx_len; tile_start += KAPSL_ATTN_TILE) {
         const int tile_len = (int) min((int64_t) KAPSL_ATTN_TILE, ctx_len - tile_start);
@@ -220,6 +256,16 @@ static __global__ void kapsl_paged_attn_kernel(
         // set of positions.
         for (int i = tid; i < tile_len; i += nthreads) {
             const int64_t pos          = tile_start + i;
+
+            // Sliding-window mask: a key outside this query's window contributes
+            // nothing. A -inf score exponentiates to 0, so it is dropped from
+            // both the softmax sum and the V accumulation below. The diagonal
+            // (pos == query_pos) is never masked, so running_max stays finite.
+            if (kapsl_is_masked_swa(n_swa, swa_type, pos, query_pos)) {
+                tile_smem[i] = -INFINITY;
+                continue;
+            }
+
             const int64_t pos_in_block = pos % block_size;
             const int64_t phys_block   = bt[pos / block_size];
 
@@ -320,6 +366,8 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
     const int32_t block_table_layer_stride = ggml_get_op_params_i32(dst, 2);
     const int32_t n_kv_heads               = ggml_get_op_params_i32(dst, 3);
     const int32_t block_table_seq_stride   = ggml_get_op_params_i32(dst, 5);
+    const int32_t n_swa                    = ggml_get_op_params_i32(dst, 6);
+    const int32_t swa_type                 = ggml_get_op_params_i32(dst, 7);
     const float scale                      = ggml_get_op_params_f32(dst, 4);
 
     const int64_t head_dim = q->ne[0];
@@ -346,6 +394,8 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
                 block_table_seq_stride,
                 n_kv_heads,
                 scale,
+                n_swa,
+                swa_type,
                 head_dim,
                 n_heads,
                 n_tokens,

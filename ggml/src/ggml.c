@@ -3996,7 +3996,9 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
         int32_t               block_table_layer_stride,
         int32_t               block_table_seq_stride,
         int32_t               n_kv_heads,
-        float                 scale) {
+        float                 scale,
+        int32_t               n_swa,
+        int32_t               swa_type) {
     GGML_ASSERT(q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16);
     GGML_ASSERT(kv_pool->type == GGML_TYPE_F16);
     GGML_ASSERT(positions->type == GGML_TYPE_I32 || positions->type == GGML_TYPE_I64);
@@ -4006,6 +4008,7 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
     GGML_ASSERT(block_table_layer_stride > 0);
     GGML_ASSERT(block_table_seq_stride >= 0);
     GGML_ASSERT(n_kv_heads > 0);
+    GGML_ASSERT(n_swa >= 0);
     GGML_ASSERT(q->ne[1] % n_kv_heads == 0);
     GGML_ASSERT(positions->ne[0] == q->ne[2]);
     GGML_ASSERT(block_table->ne[0] >= block_table_layer_stride);
@@ -4027,6 +4030,11 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
     ggml_set_op_params(result, iparams, sizeof(iparams));
     ggml_set_op_params_f32(result, 4, scale);
     ggml_set_op_params_i32(result, 5, block_table_seq_stride);
+    // Sliding-window attention: n_swa == 0 (or swa_type NONE) means full causal
+    // attention, preserving the pre-SWA behavior. Otherwise the kernel restricts
+    // each query's key range per llama_hparams::is_masked_swa.
+    ggml_set_op_params_i32(result, 6, n_swa);
+    ggml_set_op_params_i32(result, 7, swa_type);
 
     result->op     = GGML_OP_KAPSL_PAGED_ATTN;
     result->src[0] = q;
