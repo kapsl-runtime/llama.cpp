@@ -172,6 +172,11 @@ public:
             n_swa    = (int32_t) hparams->n_swa;
             swa_type = (int32_t) hparams->swa_type;
         }
+        // Attention logit softcapping (Gemma 2): applied in the kernel to match
+        // build_attn_mha. 0 disables (all other supported models).
+        const float logit_softcap = (hparams != nullptr && hparams->attn_soft_cap)
+            ? hparams->f_attn_logit_softcapping
+            : 0.0f;
         return ggml_kapsl_paged_attn(
                 ctx,
                 q,
@@ -186,7 +191,8 @@ public:
                 (int32_t) pool->num_kv_heads,
                 scale,
                 n_swa,
-                swa_type);
+                swa_type,
+                logit_softcap);
     }
 
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const override {

@@ -1731,7 +1731,8 @@ extern "C" {
             int32_t               n_kv_heads,
             float                 scale,
             int32_t               n_swa,
-            int32_t               swa_type);
+            int32_t               swa_type,
+            float                 logit_softcap);
 
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,
