@@ -57,7 +57,12 @@ void llama_model_phi3::load_arch_tensors(llama_model_loader &) {
 }
 
 std::unique_ptr<llm_graph_context> llama_model_phi3::build_arch_graph(const llm_graph_params & params) const {
-    if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+    // The Kapsl external KV pool is a single unified cache that applies the
+    // sliding window per-layer in the paged-attention kernel, so it must use the
+    // non-ISWA graph (single mctx + paged_attn); the ISWA graph assumes a
+    // llama_kv_cache_iswa_context and would crash. RoPE is identical in both
+    // graph variants here, so routing SWA through graph<false> stays correct.
+    if (hparams.swa_type != LLAMA_SWA_TYPE_NONE && params.cparams.kapsl_kv_pool == nullptr) {
         return std::make_unique<graph<true>> (*this, params);
     } else {
         return std::make_unique<graph<false>>(*this, params);

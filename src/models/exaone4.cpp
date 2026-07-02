@@ -57,7 +57,12 @@ void llama_model_exaone4::load_arch_tensors(llama_model_loader &) {
 }
 
 std::unique_ptr<llm_graph_context> llama_model_exaone4::build_arch_graph(const llm_graph_params & params) const {
-    if (hparams.swa_type == LLAMA_SWA_TYPE_STANDARD) {
+    // The Kapsl external KV pool is a single unified cache that applies the
+    // sliding window per-layer in the paged-attention kernel, so route it through
+    // the non-ISWA graph (single mctx + paged_attn); the ISWA graph assumes a
+    // llama_kv_cache_iswa_context and would crash. The per-layer RoPE (use_rope)
+    // logic lives in the shared graph body, so it is preserved.
+    if (hparams.swa_type == LLAMA_SWA_TYPE_STANDARD && params.cparams.kapsl_kv_pool == nullptr) {
         return std::make_unique<graph<true>>(*this, params);
     } else {
         return std::make_unique<graph<false>>(*this, params);

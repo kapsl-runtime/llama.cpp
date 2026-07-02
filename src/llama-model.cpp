@@ -2159,6 +2159,14 @@ int32_t llama_model_n_head_kv(const llama_model * model) {
     return model->hparams.n_head_kv();
 }
 
+int32_t llama_model_n_embd_head_k(const llama_model * model) {
+    return model->hparams.n_embd_head_k();
+}
+
+int32_t llama_model_n_embd_head_v(const llama_model * model) {
+    return model->hparams.n_embd_head_v();
+}
+
 int32_t llama_model_n_swa(const llama_model * model) {
     return model->hparams.n_swa;
 }

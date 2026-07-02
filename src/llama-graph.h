@@ -399,6 +399,11 @@ public:
     const llama_cparams cparams;
 
     const llama_kv_cache_iswa_context * mctx;
+
+    // Kapsl external pool path: a single unified cache that applies the sliding
+    // window in the paged-attention kernel, so there is no base/swa split. When
+    // set, `mctx` is unused and all routing goes through this base graph context.
+    const llama_kv_cache_graph_context * kapsl_mctx = nullptr;
 };
 
 class llm_graph_input_attn_cross : public llm_graph_input_i {

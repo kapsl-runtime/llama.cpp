@@ -199,6 +199,7 @@ static __global__ void kapsl_paged_attn_kernel(
         float scale,
         int32_t n_swa,
         int32_t swa_type,
+        float logit_softcap,
         int64_t head_dim,
         int64_t n_q_heads,
         int64_t n_tokens,
@@ -277,6 +278,12 @@ static __global__ void kapsl_paged_attn_kernel(
             float dot = 0.0f;
             for (int64_t d = 0; d < head_dim; ++d) {
                 dot += q_smem[d] * __half2float(k_ptr[d]);
+            }
+            // Attention logit softcapping (Gemma 2): applied to the raw Q·K score
+            // before the scale, matching build_attn_mha's softcap*tanh(kq/softcap)
+            // -> soft_max_ext(scale) ordering. 0 disables (no-op for other models).
+            if (logit_softcap > 0.0f) {
+                dot = logit_softcap * tanhf(dot / logit_softcap);
             }
             tile_smem[i] = dot * scale;
         }
@@ -369,6 +376,7 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
     const int32_t n_swa                    = ggml_get_op_params_i32(dst, 6);
     const int32_t swa_type                 = ggml_get_op_params_i32(dst, 7);
     const float scale                      = ggml_get_op_params_f32(dst, 4);
+    const float logit_softcap              = ggml_get_op_params_f32(dst, 8);
 
     const int64_t head_dim = q->ne[0];
     const int64_t n_heads  = q->ne[1];
@@ -396,6 +404,7 @@ static void kapsl_paged_attn_cuda(ggml_backend_cuda_context & ctx, ggml_tensor *
                 scale,
                 n_swa,
                 swa_type,
+                logit_softcap,
                 head_dim,
                 n_heads,
                 n_tokens,

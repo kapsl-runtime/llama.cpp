@@ -3998,7 +3998,8 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
         int32_t               n_kv_heads,
         float                 scale,
         int32_t               n_swa,
-        int32_t               swa_type) {
+        int32_t               swa_type,
+        float                 logit_softcap) {
     GGML_ASSERT(q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16);
     GGML_ASSERT(kv_pool->type == GGML_TYPE_F16);
     GGML_ASSERT(positions->type == GGML_TYPE_I32 || positions->type == GGML_TYPE_I64);
@@ -4035,6 +4036,10 @@ struct ggml_tensor * ggml_kapsl_paged_attn(
     // each query's key range per llama_hparams::is_masked_swa.
     ggml_set_op_params_i32(result, 6, n_swa);
     ggml_set_op_params_i32(result, 7, swa_type);
+    // Attention logit softcapping (Gemma 2): 0 disables. Applied to the raw
+    // Q·K score before the scale, matching build_attn_mha's
+    // softcap*tanh(kq/softcap) -> soft_max_ext(scale) ordering.
+    ggml_set_op_params_f32(result, 8, logit_softcap);
 
     result->op     = GGML_OP_KAPSL_PAGED_ATTN;
     result->src[0] = q;

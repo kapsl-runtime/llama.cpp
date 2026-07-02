@@ -500,6 +500,22 @@ bool llm_graph_input_attn_k::can_reuse(const llm_graph_params & params) {
 }
 
 void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
+    if (kapsl_mctx != nullptr) {
+        // Single unified cache: base/swa slots alias the same tensors. Only the
+        // base inputs need filling; set_input_kq_mask is a no-op on the kapsl
+        // context (the window is applied in the paged-attention kernel).
+        kapsl_mctx->set_input_k_idxs(self_k_idxs, ubatch);
+        kapsl_mctx->set_input_v_idxs(self_v_idxs, ubatch);
+        kapsl_mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+        if (self_k_rot) {
+            kapsl_mctx->set_input_k_rot(self_k_rot);
+        }
+        if (self_v_rot) {
+            kapsl_mctx->set_input_v_rot(self_v_rot);
+        }
+        return;
+    }
+
     mctx->get_base()->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->get_base()->set_input_v_idxs(self_v_idxs, ubatch);
 
@@ -528,6 +544,16 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
 }
 
 bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
+    if (params.cparams.kapsl_kv_pool != nullptr) {
+        // Single unified cache: the kq_masks are unused, so only the token count
+        // of the shared idxs matters for reuse.
+        this->kapsl_mctx = static_cast<const llama_kv_cache_graph_context *>(params.mctx);
+
+        bool res = true;
+        res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
+        return res;
+    }
+
     const auto * mctx = static_cast<const llama_kv_cache_iswa_context *>(params.mctx);
 
     this->mctx = mctx;
@@ -2153,7 +2179,12 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
     auto inp = std::make_unique<llm_graph_input_attn_kv>(hparams, cparams, mctx_cur);
 
     {
-        GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE && "Use llama_kv_cache_iswa for SWA");
+        // The Kapsl external pool is a single unified cache that applies the
+        // sliding window inside the paged-attention kernel, so SWA models use
+        // this non-ISWA input builder; its kq_mask is unused (the kapsl context
+        // overrides set_input_kq_mask as a no-op).
+        GGML_ASSERT((hparams.swa_type == LLAMA_SWA_TYPE_NONE || cparams.kapsl_kv_pool != nullptr) &&
+                    "Use llama_kv_cache_iswa for SWA");
 
         inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
         inp->self_v_idxs = mctx_cur->build_input_v_idxs(ctx0, ubatch);
@@ -2270,7 +2301,12 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
     auto inp = std::make_unique<llm_graph_input_attn_k>(hparams, cparams, mctx_cur);
 
     {
-        GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE && "Use llama_kv_cache_iswa for SWA");
+        // The Kapsl external pool is a single unified cache that applies the
+        // sliding window inside the paged-attention kernel, so SWA models use
+        // this non-ISWA input builder; its kq_mask is unused (the kapsl context
+        // overrides set_input_kq_mask as a no-op).
+        GGML_ASSERT((hparams.swa_type == LLAMA_SWA_TYPE_NONE || cparams.kapsl_kv_pool != nullptr) &&
+                    "Use llama_kv_cache_iswa for SWA");
 
         inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
 
@@ -2360,6 +2396,69 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
+    if (inp->kapsl_mctx != nullptr) {
+        // Single unified cache: the sliding window is applied per-layer inside
+        // the paged-attention kernel (via is_swa(il)), so route through the same
+        // paged_attn path as the non-ISWA build_attn, using the single shared
+        // idxs/rot tensors for every layer. The native ISWA path below is left
+        // unchanged.
+        const auto * mctx_cur = inp->kapsl_mctx;
+
+        if (inp->self_k_rot) {
+            q_cur = ggml_mul_mat_aux(ctx0, q_cur, inp->self_k_rot);
+            if (k_cur) {
+                k_cur = ggml_mul_mat_aux(ctx0, k_cur, inp->self_k_rot);
+            }
+        }
+        if (inp->self_v_rot && v_cur) {
+            v_cur = ggml_mul_mat_aux(ctx0, v_cur, inp->self_v_rot);
+        }
+
+        ggml_build_forward_expand(gf, q_cur);
+        if (k_cur) {
+            ggml_build_forward_expand(gf, k_cur);
+        }
+        if (v_cur) {
+            ggml_build_forward_expand(gf, v_cur);
+        }
+
+        if (k_cur) {
+            ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, inp->get_k_idxs(), il));
+        }
+        if (v_cur) {
+            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, inp->get_v_idxs(), il));
+        }
+
+        ggml_tensor * q = q_cur;
+
+        ggml_tensor * cur = nullptr;
+        if (kq_b == nullptr && sinks == nullptr) {
+            cur = mctx_cur->paged_attn(ctx0, q, inp->get_k_idxs(), kq_scale, il);
+            if (cur) {
+                cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]);
+            }
+        }
+        if (cur == nullptr) {
+            ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+            ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+            cur = build_attn_mha(q, k, v, kq_b, inp->get_kq_mask(), sinks, v_mla, kq_scale, il);
+        }
+        cb(cur, "kqv_out", il);
+
+        if (inp->self_v_rot) {
+            cur = ggml_mul_mat_aux(ctx0, cur, inp->self_v_rot);
+        }
+
+        if (wo) {
+            cur = build_lora_mm(wo, cur, wo_s);
+        }
+        if (wo_b) {
+            cur = ggml_add(ctx0, cur, wo_b);
+        }
+
+        return cur;
+    }
+
     const bool is_swa = hparams.is_swa(il);
 
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
@@ -2494,6 +2593,35 @@ ggml_tensor * llm_graph_context::build_attn(
 //       like with the non-sliding window equivalent
 //       once sliding-window hybrid caches are a thing.
 llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const {
+    // Kapsl external pool: a single unified cache that applies the sliding window
+    // in the paged-attention kernel. There is no base/swa sub-cache to cast to,
+    // so build the input from the base graph-context interface (valid cast) and
+    // point both the base and swa slots at the same tensors. The kq_masks are
+    // built but unused (the kapsl context's set_input_kq_mask is a no-op).
+    if (cparams.kapsl_kv_pool != nullptr) {
+        const auto * kapsl_mctx = static_cast<const llama_kv_cache_graph_context *>(mctx);
+
+        auto inp = std::make_unique<llm_graph_input_attn_kv_iswa>(hparams, cparams, nullptr);
+        inp->kapsl_mctx = kapsl_mctx;
+
+        inp->self_k_idxs = kapsl_mctx->build_input_k_idxs(ctx0, ubatch);
+        inp->self_v_idxs = kapsl_mctx->build_input_v_idxs(ctx0, ubatch);
+        inp->self_k_idxs_swa = inp->self_k_idxs;
+        inp->self_v_idxs_swa = inp->self_v_idxs;
+
+        inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, kapsl_mctx, ubatch, cparams);
+        inp->self_kq_mask_cnv = cparams.flash_attn ? ggml_cast(ctx0, inp->self_kq_mask, GGML_TYPE_F16) : inp->self_kq_mask;
+        inp->self_kq_mask_swa = inp->self_kq_mask;
+        inp->self_kq_mask_swa_cnv = inp->self_kq_mask_cnv;
+
+        inp->self_k_rot = kapsl_mctx->build_input_k_rot(ctx0);
+        inp->self_v_rot = kapsl_mctx->build_input_v_rot(ctx0);
+        inp->self_k_rot_swa = inp->self_k_rot;
+        inp->self_v_rot_swa = inp->self_v_rot;
+
+        return (llm_graph_input_attn_kv_iswa *) res->add_input(std::move(inp));
+    }
+
     const auto * mctx_cur = static_cast<const llama_kv_cache_iswa_context *>(mctx);
 
     auto inp = std::make_unique<llm_graph_input_attn_kv_iswa>(hparams, cparams, mctx_cur);
