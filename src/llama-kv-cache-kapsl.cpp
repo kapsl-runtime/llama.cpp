@@ -790,6 +790,14 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
                 break;
             }
         }
+        if (ok && pool->commit_seq != nullptr) {
+            ok = pool->commit_seq(pool->user_data, &combined_table);
+        }
+        if (ok && combined_table == nullptr) {
+            LLAMA_LOG_ERROR("%s: Kapsl KV reserve_seq returned an empty combined block table\n",
+                    __func__);
+            ok = false;
+        }
         if (ok) {
             multi_seq_active = true;
             block_table_device = combined_table;
