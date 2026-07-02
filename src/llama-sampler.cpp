@@ -3485,6 +3485,46 @@ static void llama_sampler_logit_bias_free(struct llama_sampler * smpl) {
     delete (llama_sampler_logit_bias *) smpl->ctx;
 }
 
+// Per-graph dedupe of the logit-bias backend input leaves.
+//
+// Kapsl builds one logit-bias sampler per active sequence (e.g. the EOS
+// suppression used for min-tokens / exact-length generation). Each sampler's
+// backend_apply used to emit its own `logit_bias` + `logit_idxs`
+// ggml_set_input leaves; because every EOS-suppression sampler carries
+// identical content but a distinct tensor object, the scheduler charged one
+// split-input per sampler (it dedupes copy-inputs only by tensor hash). The
+// per-split input count therefore grew as 6 + 2*N and overflowed
+// GGML_SCHED_MAX_SPLIT_INPUTS around concurrency ~15.
+//
+// Samplers cannot see each other, so identical input leaves are shared via a
+// thread-local registry keyed on the live ggml_context (the graph currently
+// being built) plus the bias content. Keying on the context is safe for the
+// same reason the Kapsl KV cache reuses it: llm_graph_result::reset()
+// allocates the next context before freeing the previous one, so consecutive
+// graph builds never share an address and a cached tensor can never dangle.
+// The per-sequence `set_rows`/`add` nodes stay distinct; only the uploaded
+// input leaves collapse, so the split-input count becomes flat (6 + 2) in
+// concurrency. backend_set_input still runs per sampler and writes identical
+// data into the shared tensor, which is idempotent.
+struct llama_logit_bias_input_cache {
+    const ggml_context * ctx = nullptr;
+    std::vector<std::pair<uint64_t, std::pair<ggml_tensor *, ggml_tensor *>>> entries;
+};
+
+static uint64_t llama_logit_bias_content_key(int32_t n_vocab, const std::vector<llama_logit_bias> & lb) {
+    uint64_t h = 1469598103934665603ull; // FNV-1a
+    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    mix((uint64_t) (uint32_t) n_vocab);
+    mix((uint64_t) lb.size());
+    for (const auto & b : lb) {
+        mix((uint64_t) (uint32_t) b.token);
+        uint32_t bits;
+        std::memcpy(&bits, &b.bias, sizeof(bits));
+        mix((uint64_t) bits);
+    }
+    return h;
+}
+
 static void llama_sampler_logit_bias_backend_apply(
         struct llama_sampler      * smpl,
         struct ggml_context       * ctx,
@@ -3500,13 +3540,36 @@ static void llama_sampler_logit_bias_backend_apply(
 
     const size_t n = sctx->logit_bias.size();
 
-    sctx->inp_logit_bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, n);
-    ggml_set_name(sctx->inp_logit_bias, "logit_bias");
-    ggml_set_input(sctx->inp_logit_bias);
+    // Reset the registry when a new graph (context) starts building.
+    static thread_local llama_logit_bias_input_cache cache;
+    if (cache.ctx != ctx) {
+        cache.ctx = ctx;
+        cache.entries.clear();
+    }
 
-    sctx->inp_logit_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n);
-    ggml_set_name(sctx->inp_logit_idxs, "logit_idxs");
-    ggml_set_input(sctx->inp_logit_idxs);
+    const uint64_t key = llama_logit_bias_content_key(sctx->n_vocab, sctx->logit_bias);
+
+    sctx->inp_logit_bias = nullptr;
+    sctx->inp_logit_idxs = nullptr;
+    for (const auto & e : cache.entries) {
+        if (e.first == key) {
+            sctx->inp_logit_bias = e.second.first;
+            sctx->inp_logit_idxs = e.second.second;
+            break;
+        }
+    }
+
+    if (sctx->inp_logit_bias == nullptr) {
+        sctx->inp_logit_bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, n);
+        ggml_set_name(sctx->inp_logit_bias, "logit_bias");
+        ggml_set_input(sctx->inp_logit_bias);
+
+        sctx->inp_logit_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n);
+        ggml_set_name(sctx->inp_logit_idxs, "logit_idxs");
+        ggml_set_input(sctx->inp_logit_idxs);
+
+        cache.entries.push_back({ key, { sctx->inp_logit_bias, sctx->inp_logit_idxs } });
+    }
 
     ggml_tensor * cur = ggml_fill(ctx, data->logits, 0.0f);
 
