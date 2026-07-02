@@ -2153,7 +2153,12 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
     auto inp = std::make_unique<llm_graph_input_attn_kv>(hparams, cparams, mctx_cur);
 
     {
-        GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE && "Use llama_kv_cache_iswa for SWA");
+        // The Kapsl external pool is a single unified cache that applies the
+        // sliding window inside the paged-attention kernel, so SWA models use
+        // this non-ISWA input builder; its kq_mask is unused (the kapsl context
+        // overrides set_input_kq_mask as a no-op).
+        GGML_ASSERT((hparams.swa_type == LLAMA_SWA_TYPE_NONE || cparams.kapsl_kv_pool != nullptr) &&
+                    "Use llama_kv_cache_iswa for SWA");
 
         inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
         inp->self_v_idxs = mctx_cur->build_input_v_idxs(ctx0, ubatch);
@@ -2270,7 +2275,12 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
     auto inp = std::make_unique<llm_graph_input_attn_k>(hparams, cparams, mctx_cur);
 
     {
-        GGML_ASSERT(hparams.swa_type == LLAMA_SWA_TYPE_NONE && "Use llama_kv_cache_iswa for SWA");
+        // The Kapsl external pool is a single unified cache that applies the
+        // sliding window inside the paged-attention kernel, so SWA models use
+        // this non-ISWA input builder; its kq_mask is unused (the kapsl context
+        // overrides set_input_kq_mask as a no-op).
+        GGML_ASSERT((hparams.swa_type == LLAMA_SWA_TYPE_NONE || cparams.kapsl_kv_pool != nullptr) &&
+                    "Use llama_kv_cache_iswa for SWA");
 
         inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
 
