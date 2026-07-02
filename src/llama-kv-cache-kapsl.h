@@ -3,6 +3,7 @@
 #include "llama-kv-cache.h"
 
 struct llama_model;
+struct llama_hparams;
 
 // External paged KV cache backed by Kapsl's GpuBlockPool.
 //
@@ -63,6 +64,10 @@ private:
     llama_memory_context_ptr make_status_context(llama_memory_status status) const;
 
     llama_kapsl_kv_pool_desc * pool;
+    // Model hyper-parameters, used at graph-build time to apply per-layer
+    // sliding-window attention (is_swa/n_swa/swa_type). Points into the owning
+    // llama_model, which outlives this cache.
+    const llama_hparams * hparams = nullptr;
     uint64_t session_id;
     uint32_t * block_table_device = nullptr;
     uint32_t n_reserved_blocks    = 0;

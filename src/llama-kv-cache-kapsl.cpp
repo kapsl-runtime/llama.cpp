@@ -65,12 +65,14 @@ public:
             llama_kapsl_kv_pool_desc * pool,
             uint32_t n_kv,
             std::vector<llama_ubatch> ubatches = {},
-            bool multi_seq = false) :
+            bool multi_seq = false,
+            const llama_hparams * hparams = nullptr) :
         status(status),
         pool(pool),
         n_kv(n_kv),
         ubatches(std::move(ubatches)),
-        multi_seq(multi_seq) {
+        multi_seq(multi_seq),
+        hparams(hparams) {
     }
 
     ~llama_kv_cache_kapsl_context() override {
@@ -161,6 +163,15 @@ public:
             ggml_tensor  * positions,
             float          scale,
             int32_t        il) const override {
+        // Per-layer sliding-window attention. On full-attention layers (and
+        // whole models without SWA) is_swa(il) is false, so n_swa stays 0 and
+        // the kernel runs plain causal attention exactly as before.
+        int32_t n_swa    = 0;
+        int32_t swa_type = 0; // LLAMA_SWA_TYPE_NONE
+        if (hparams != nullptr && hparams->is_swa(il)) {
+            n_swa    = (int32_t) hparams->n_swa;
+            swa_type = (int32_t) hparams->swa_type;
+        }
         return ggml_kapsl_paged_attn(
                 ctx,
                 q,
@@ -173,7 +184,9 @@ public:
                 (int32_t) pool->block_table_layer_stride,
                 multi_seq ? (int32_t) pool->block_table_seq_stride : 0,
                 (int32_t) pool->num_kv_heads,
-                scale);
+                scale,
+                n_swa,
+                swa_type);
     }
 
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const override {
@@ -523,6 +536,12 @@ private:
     // (filled in set_input_k_idxs from ubatch->seq_id) and the pool's combined
     // block table. False keeps the single-sequence path byte-for-byte unchanged.
     bool multi_seq = false;
+
+    // Model hyper-parameters for per-layer sliding-window attention, or nullptr
+    // when unknown (status-only contexts that never build a graph). paged_attn()
+    // reads is_swa(il)/n_swa/swa_type from here.
+    const llama_hparams * hparams = nullptr;
+
     mutable ggml_tensor * seq_slot_input = nullptr;
 };
 
@@ -535,6 +554,7 @@ llama_kv_cache_kapsl::llama_kv_cache_kapsl(
 llama_kapsl_kv_pool_desc *   pool,
                  uint64_t   session_id) :
     pool(pool),
+    hparams(&model.hparams),
     session_id(session_id) {
     if (pool == nullptr) {
         throw std::runtime_error("llama_kv_cache_kapsl requires a pool descriptor");
@@ -830,7 +850,8 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
             pool,
             n_reserved_tokens,
             std::move(ubatches),
-            multi_seq_active);
+            multi_seq_active,
+            hparams);
 }
 
 llama_memory_context_ptr llama_kv_cache_kapsl::init_full() {
