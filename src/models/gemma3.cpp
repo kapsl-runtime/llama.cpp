@@ -73,7 +73,14 @@ void llama_model_gemma3::load_arch_tensors(llama_model_loader &) {
 }
 
 std::unique_ptr<llm_graph_context> llama_model_gemma3::build_arch_graph(const llm_graph_params & params) const {
-    if (hparams.swa_type == LLAMA_SWA_TYPE_STANDARD) {
+    // The Kapsl external KV pool is a single unified cache that applies the
+    // sliding window per-layer inside the paged-attention kernel. It must use
+    // the non-ISWA graph (single memory context + paged_attn): the ISWA graph
+    // assumes a llama_kv_cache_iswa_context with get_base()/get_swa() sub-caches
+    // and would crash on the kapsl context. Per-layer RoPE is preserved in both
+    // graph variants (see the get_rope_freq_base call below), so routing SWA
+    // through graph<false> stays correct.
+    if (hparams.swa_type == LLAMA_SWA_TYPE_STANDARD && params.cparams.kapsl_kv_pool == nullptr) {
         return std::make_unique<graph<true>>(*this, params);
     } else {
         return std::make_unique<graph<false>>(*this, params);
@@ -109,16 +116,12 @@ llama_model_gemma3::graph<iswa>::graph(const llama_model & model, const llm_grap
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
-        float freq_base_l  = 0.0f;
-        float freq_scale_l = 0.0f;
-
-        if constexpr (iswa) {
-            freq_base_l  = model.get_rope_freq_base (cparams, il);
-            freq_scale_l = model.get_rope_freq_scale(cparams, il);
-        } else {
-            freq_base_l  = freq_base;
-            freq_scale_l = freq_scale;
-        }
+        // Per-layer RoPE frequency. get_rope_freq_base/scale return the global
+        // (non-SWA) values on full-attention layers, so this is correct for the
+        // plain non-SWA model too and lets graph<false> serve SWA models on the
+        // Kapsl single-cache path with the right local/global RoPE per layer.
+        const float freq_base_l  = model.get_rope_freq_base (cparams, il);
+        const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
 
         // norm
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
