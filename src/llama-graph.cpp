@@ -545,12 +545,18 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
 
 bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
     if (params.cparams.kapsl_kv_pool != nullptr) {
-        // Single unified cache: the kq_masks are unused, so only the token count
-        // of the shared idxs matters for reuse.
+        // Single unified cache: mirror the non-ISWA kapsl can_reuse exactly. The
+        // kq_mask check is what forces a graph rebuild when the KV reservation
+        // changes — and a rebuild re-runs build_input_k_idxs() -> reset_graph_cache(),
+        // which refreshes the per-graph block-table view. Skipping it reused a
+        // stale block-table tensor on some steps -> wrong KV reads -> intermittent
+        // degeneration. (self_kq_mask is built like the non-ISWA path but is
+        // otherwise unused by paged_attn.)
         this->kapsl_mctx = static_cast<const llama_kv_cache_graph_context *>(params.mctx);
 
         bool res = true;
         res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
+        res &= can_reuse_kq_mask(self_kq_mask, kapsl_mctx, params.ubatch, params.cparams);
         return res;
     }
 
