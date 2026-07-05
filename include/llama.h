@@ -691,6 +691,12 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_embd_head_v(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
 
+    // True when layer il uses sliding-window attention (hparams.is_swa(il)).
+    // False for out-of-range il. Layers of iSWA models alternate between
+    // windowed and full attention; callers sizing per-layer KV storage need
+    // the per-layer answer, not just the model-wide n_swa.
+    LLAMA_API bool llama_model_is_swa_layer  (const struct llama_model * model, int32_t il);
+
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 
