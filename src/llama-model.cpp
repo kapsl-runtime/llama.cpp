@@ -2171,6 +2171,13 @@ int32_t llama_model_n_swa(const llama_model * model) {
     return model->hparams.n_swa;
 }
 
+bool llama_model_is_swa_layer(const llama_model * model, int32_t il) {
+    if (il < 0 || (uint32_t) il >= model->hparams.n_layer) {
+        return false;
+    }
+    return model->hparams.is_swa((uint32_t) il);
+}
+
 uint32_t llama_model_n_cls_out(const struct llama_model * model) {
     return model->hparams.n_cls_out;
 }

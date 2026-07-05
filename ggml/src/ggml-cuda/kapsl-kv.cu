@@ -59,6 +59,37 @@ static __device__ __forceinline__ bool kapsl_is_masked_swa(
     }
 }
 
+// First key position query p1 may attend to — the exact complement of
+// kapsl_is_masked_swa for causal queries (p0 <= p1): every p0 < the returned
+// start is masked, every p0 in [start, p1] is visible. Used to skip
+// fully-masked tiles and, with the windowed KV pool, to guarantee the kernel
+// never dereferences block-table entries whose physical block has been
+// recycled for a newer position (the Rust allocator only recycles blocks that
+// lie entirely below every live query's window start).
+static __device__ __forceinline__ int64_t kapsl_swa_window_start(
+        int n_swa, int swa_type, int64_t p1) {
+    if (n_swa <= 0) {
+        return 0;
+    }
+    int64_t start = 0;
+    switch (swa_type) {
+        case KAPSL_SWA_TYPE_STANDARD:
+            start = p1 - n_swa + 1;
+            break;
+        case KAPSL_SWA_TYPE_CHUNKED:
+            start = (p1 / n_swa) * n_swa;
+            break;
+        case KAPSL_SWA_TYPE_SYMMETRIC:
+            // The symmetric upper bound (keys beyond p1 + n_swa/2) cannot occur
+            // here: the caller's ctx_len bound already restricts keys to p0 <= p1.
+            start = p1 - n_swa / 2;
+            break;
+        default:
+            return 0;
+    }
+    return start > 0 ? start : 0;
+}
+
 template<typename src_t, typename pos_t>
 static __global__ void kapsl_kv_write_kernel(
         half        * __restrict__ pool,
@@ -250,7 +281,15 @@ static __global__ void kapsl_paged_attn_kernel(
     const int64_t query_pos = (int64_t) positions[token];
     const int64_t ctx_len    = query_pos + 1;
 
-    for (int64_t tile_start = 0; tile_start < ctx_len; tile_start += KAPSL_ATTN_TILE) {
+    // Skip tiles that lie entirely below the sliding window: every position in
+    // them is masked, so they contribute nothing to the online softmax. The
+    // first visited tile may straddle the window edge; the per-position mask
+    // check below handles its leading masked positions. Full attention
+    // (n_swa == 0) keeps win_start = 0 and this loop is unchanged.
+    const int64_t win_start = kapsl_swa_window_start(n_swa, swa_type, query_pos);
+
+    for (int64_t tile_start = (win_start / KAPSL_ATTN_TILE) * KAPSL_ATTN_TILE;
+            tile_start < ctx_len; tile_start += KAPSL_ATTN_TILE) {
         const int tile_len = (int) min((int64_t) KAPSL_ATTN_TILE, ctx_len - tile_start);
 
         // Score this tile: each thread computes full Q·K dots for a strided
@@ -333,6 +372,13 @@ static __global__ void kapsl_paged_attn_kernel(
         // Accumulate V: threads own head dims, positions read coalesced.
         for (int i = 0; i < tile_len; ++i) {
             const int64_t pos          = tile_start + i;
+            // Masked positions carry weight 0, so skipping them is a no-op
+            // numerically — but with the windowed KV pool their block-table
+            // entries may point at recycled physical blocks, so they must not
+            // be dereferenced at all.
+            if (pos < win_start) {
+                continue;
+            }
             const int64_t pos_in_block = pos % block_size;
             const int64_t phys_block   = bt[pos / block_size];
 
