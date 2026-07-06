@@ -3430,7 +3430,7 @@ struct llama_sampler * llama_sampler_init_adaptive_p(
 struct llama_sampler_logit_bias : public llama_sampler_backend {
     const int32_t n_vocab;
 
-    const std::vector<llama_logit_bias> logit_bias;
+    std::vector<llama_logit_bias> logit_bias; // mutable via llama_sampler_logit_bias_set
 
     std::vector<llama_logit_bias> to_search;
 
@@ -3654,6 +3654,30 @@ struct llama_sampler * llama_sampler_init_logit_bias(
             /* .inp_logit_idxs = */ nullptr,
         }
     );
+}
+
+bool llama_sampler_logit_bias_set(
+        struct llama_sampler * smpl,
+                     int32_t   n_logit_bias,
+      const llama_logit_bias * logit_bias) {
+    if (smpl == nullptr || smpl->iface != &llama_sampler_logit_bias_i) {
+        return false;
+    }
+    if (n_logit_bias < 0 || (n_logit_bias > 0 && logit_bias == nullptr)) {
+        return false;
+    }
+
+    auto * sctx = (llama_sampler_logit_bias *) smpl->ctx;
+
+    for (int32_t i = 0; i < n_logit_bias; ++i) {
+        if (logit_bias[i].token < 0 || logit_bias[i].token >= sctx->n_vocab) {
+            return false;
+        }
+    }
+
+    sctx->logit_bias.assign(logit_bias, logit_bias + n_logit_bias);
+
+    return true;
 }
 
 // infill
