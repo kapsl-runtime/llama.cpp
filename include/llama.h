@@ -1574,6 +1574,18 @@ extern "C" {
                              int32_t   n_logit_bias,
               const llama_logit_bias * logit_bias);
 
+    // replace the bias entries of an existing logit-bias sampler in place,
+    // without re-installing it into the context. The next decode uploads the
+    // new values via backend_set_input, so a sampler that stays installed for
+    // the context lifetime never re-triggers a scheduler reserve. Returns
+    // false if smpl is not a logit-bias sampler (e.g. it was created with
+    // n_logit_bias == 0). Keeping the entry count stable keeps the graph
+    // within the reserved worst case.
+    LLAMA_API bool llama_sampler_logit_bias_set(
+                struct llama_sampler * smpl,
+                             int32_t   n_logit_bias,
+              const llama_logit_bias * logit_bias);
+
     // this sampler is meant to be used for fill-in-the-middle infilling
     // it's supposed to be used after top_k + top_p sampling
     //
