@@ -315,6 +315,12 @@ private:
 
     std::vector<swap_info> output_swaps;
 
+    // whether the host `logits` buffer holds data extracted for the current
+    // batch. When every output row is covered by a backend sampler the raw
+    // logits are never copied back (see needs_raw_logits), so output_reorder
+    // can skip shuffling their stale rows.
+    bool logits_batch_valid = true;
+
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
