@@ -1324,6 +1324,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
         GGML_ASSERT(logits.data != nullptr);
 
         ggml_backend_tensor_get_async(backend_res, t_logits, logits.data, 0, n_tokens*n_vocab*sizeof(float));
+        logits_batch_valid = true;
     }
 
     // extract embeddings
@@ -1610,6 +1611,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // TODO: this clear of the buffer can easily be forgotten - need something better
     embd_seq.clear();
     output_swaps.clear();
+    logits_batch_valid = false;
 
     sched_reserve();
 
@@ -1748,6 +1750,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                logits_batch_valid = true;
             }
         }
 
@@ -2024,7 +2027,10 @@ void llama_context::output_reorder() {
         const uint64_t i0 = output_swaps[s].i0;
         const uint64_t i1 = output_swaps[s].i1;
 
-        if (logits.size > 0) {
+        // the host logits buffer is not filled when every output row is
+        // covered by a backend sampler (see needs_raw_logits), so its rows
+        // only need shuffling when this batch actually extracted them.
+        if (logits.size > 0 && logits_batch_valid) {
             for (uint64_t k = 0; k < n_vocab; k++) {
                 std::swap(logits.data[i0*n_vocab + k], logits.data[i1*n_vocab + k]);
             }
@@ -2045,16 +2051,29 @@ void llama_context::output_reorder() {
             assert(sampling.probs_count.size() > 0);
             assert(sampling.candidates_count.size() > 0);
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.logits.data[i0*n_vocab + k], sampling.logits.data[i1*n_vocab + k]);
+            // the vocab-wide sampling buffers hold data only for rows whose
+            // samplers requested a copy-back this batch; the count vectors
+            // (zeroed each decode in output_reserve) record which rows are
+            // live. Swapping dead rows moves ~3*n_vocab stale values per swap
+            // and dominated multi-sequence decode time, so shuffle only rows
+            // that carry data. The counts are swapped below so validity
+            // travels with the data.
+            if (sampling.logits_count[i0] > 0 || sampling.logits_count[i1] > 0) {
+                for (uint64_t k = 0; k < n_vocab; ++k) {
+                    std::swap(sampling.logits.data[i0*n_vocab + k], sampling.logits.data[i1*n_vocab + k]);
+                }
             }
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.probs.data[i0*n_vocab + k], sampling.probs.data[i1*n_vocab + k]);
+            if (sampling.probs_count[i0] > 0 || sampling.probs_count[i1] > 0) {
+                for (uint64_t k = 0; k < n_vocab; ++k) {
+                    std::swap(sampling.probs.data[i0*n_vocab + k], sampling.probs.data[i1*n_vocab + k]);
+                }
             }
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.candidates.data[i0*n_vocab + k], sampling.candidates.data[i1*n_vocab + k]);
+            if (sampling.candidates_count[i0] > 0 || sampling.candidates_count[i1] > 0) {
+                for (uint64_t k = 0; k < n_vocab; ++k) {
+                    std::swap(sampling.candidates.data[i0*n_vocab + k], sampling.candidates.data[i1*n_vocab + k]);
+                }
             }
 
             std::swap(sampling.sampled.data[i0],     sampling.sampled.data[i1]);
