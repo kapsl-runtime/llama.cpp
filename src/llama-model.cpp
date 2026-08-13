@@ -2432,6 +2432,32 @@ uint64_t llama_model_size(const llama_model * model) {
     return model->size();
 }
 
+int32_t llama_model_device_memory_count(const llama_model * model) {
+    return (int32_t) model->devices.size();
+}
+
+uint64_t llama_model_device_memory(const llama_model * model, int32_t device_index) {
+    if (device_index < 0 || device_index >= (int32_t) model->devices.size()) {
+        return 0;
+    }
+
+    const ggml_backend_dev_t target = model->devices[device_index].dev;
+    uint64_t bytes = 0;
+    for (const auto & [buft, size] : model->memory_breakdown()) {
+        if (ggml_backend_buft_get_device(buft) == target) {
+            bytes += size;
+        }
+    }
+    return bytes;
+}
+
+const char * llama_model_device_name(const llama_model * model, int32_t device_index) {
+    if (device_index < 0 || device_index >= (int32_t) model->devices.size()) {
+        return nullptr;
+    }
+    return ggml_backend_dev_name(model->devices[device_index].dev);
+}
+
 const char * llama_model_chat_template(const llama_model * model, const char * name) {
     const auto key = name ? LLM_KV(model->arch, name)(LLM_KV_TOKENIZER_CHAT_TEMPLATE)
         : LLM_KV(model->arch)(LLM_KV_TOKENIZER_CHAT_TEMPLATE);

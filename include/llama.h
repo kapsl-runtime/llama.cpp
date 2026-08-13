@@ -738,6 +738,15 @@ extern "C" {
     // Returns the total size of all the tensors in the model in bytes
     LLAMA_API uint64_t llama_model_size(const struct llama_model * model);
 
+    // Returns the number of accelerator devices holding model buffers.
+    LLAMA_API int32_t llama_model_device_memory_count(const struct llama_model * model);
+
+    // Returns the bytes allocated for model buffers on a device by model-device index.
+    LLAMA_API uint64_t llama_model_device_memory(const struct llama_model * model, int32_t device_index);
+
+    // Returns the backend device name for a model-device index, or NULL.
+    LLAMA_API const char * llama_model_device_name(const struct llama_model * model, int32_t device_index);
+
     // Get the default chat template. Returns nullptr if not available
     // If name is NULL, returns the default chat template
     LLAMA_API const char * llama_model_chat_template(const struct llama_model * model, const char * name);
