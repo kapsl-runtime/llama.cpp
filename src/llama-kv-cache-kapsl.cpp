@@ -537,8 +537,9 @@ private:
     mutable ggml_tensor * cached_pool_base_tensor = nullptr;
     mutable ggml_tensor * cached_block_table_tensor = nullptr;
 
-    // Multi-sequence batching: when true, several sequences share one decode
-    // and the kernels select each token's block-table slice via seq_slot_input
+    // Sequence-aware addressing: when true, the kernels select each token's
+    // combined block-table slice via seq_slot_input, including one-sequence
+    // batches, so the representation stays stable as concurrency changes.
     // (filled in set_input_k_idxs from ubatch->seq_id) and the pool's combined
     // block table. False keeps the single-sequence path byte-for-byte unchanged.
     bool multi_seq = false;
@@ -705,11 +706,20 @@ void llama_kv_cache_kapsl::promote_to_cache(uint32_t n_new_logical) {
 }
 
 void llama_kv_cache_kapsl::release_session() {
-    if (!has_reservation || pool == nullptr || pool->release == nullptr) {
+    if (pool == nullptr || pool->release == nullptr) {
         return;
     }
 
-    pool->release(pool->user_data, session_id);
+    if (!reserved_seq_ids.empty()) {
+        for (const llama_seq_id seq_id : reserved_seq_ids) {
+            pool->release(pool->user_data, (uint64_t) seq_id);
+        }
+        reserved_seq_ids.clear();
+    } else if (has_reservation) {
+        // Legacy descriptors without reserve_seq still use the singleton
+        // reservation keyed by the context's session id.
+        pool->release(pool->user_data, session_id);
+    }
     block_table_device = nullptr;
     n_reserved_blocks = 0;
     n_reserved_tokens = 0;
@@ -798,14 +808,14 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
         return make_status_context(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
     }
 
-    // Multi-sequence batching: when more than one sequence shares this decode
-    // and the pool advertises combined-table support, reserve each sequence's
-    // slot individually. The kernels then select per-token slices via seq_slot.
+    // Sequence-aware pools always use the combined table, even when this batch
+    // currently contains only one sequence. Switching between the singleton
+    // and combined representations as concurrency changes loses live KV state.
     const bool can_multi_seq = pool->reserve_seq != nullptr && pool->n_seq_slots > 0;
     bool multi_seq_active = false;
 
     bool ok;
-    if (can_multi_seq && seq_tokens.size() > 1) {
+    if (can_multi_seq && !seq_tokens.empty()) {
         ok = true;
         uint32_t * combined_table = nullptr;
         for (const auto & [sid, toks] : seq_tokens) {
@@ -815,6 +825,7 @@ llama_memory_context_ptr llama_kv_cache_kapsl::init_batch(
                 ok = false;
                 break;
             }
+            reserved_seq_ids.insert(sid);
         }
         if (ok && pool->commit_seq != nullptr) {
             ok = pool->commit_seq(pool->user_data, &combined_table);
@@ -877,17 +888,31 @@ void llama_kv_cache_kapsl::clear(bool) {
 }
 
 bool llama_kv_cache_kapsl::seq_rm(llama_seq_id seq_id, llama_pos, llama_pos) {
-    // Release this sequence's multi-sequence slot (frees its persistent blocks
-    // and clears its block-table region). No-op in single-sequence mode, where
-    // release_session() below performs the actual release.
-    if (seq_id >= 0 && pool != nullptr && pool->release != nullptr) {
-        pool->release(pool->user_data, (uint64_t) seq_id);
+    if (seq_id < 0) {
+        release_session();
+        return true;
     }
-    release_session();
+
+    // Release only the retiring sequence. Releasing the context session here
+    // can alias another active slot (the context session id is commonly 1).
+    if (reserved_seq_ids.erase(seq_id) > 0 && pool != nullptr && pool->release != nullptr) {
+        pool->release(pool->user_data, (uint64_t) seq_id);
+    } else if (reserved_seq_ids.empty() && has_reservation) {
+        // Compatibility path for descriptors without reserve_seq.
+        release_session();
+        return true;
+    }
+    if (reserved_seq_ids.empty()) {
+        block_table_device = nullptr;
+        n_reserved_blocks = 0;
+        n_reserved_tokens = 0;
+        has_reservation = false;
+    }
     return true;
 }
 
 void llama_kv_cache_kapsl::seq_cp(llama_seq_id, llama_seq_id, llama_pos, llama_pos) {
+    GGML_ABORT("Kapsl shared-KV does not support seq_cp; exact-prompt KV reuse must remain disabled");
 }
 
 void llama_kv_cache_kapsl::seq_keep(llama_seq_id) {

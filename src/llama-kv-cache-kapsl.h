@@ -2,6 +2,8 @@
 
 #include "llama-kv-cache.h"
 
+#include <unordered_set>
+
 struct llama_model;
 struct llama_hparams;
 
@@ -73,6 +75,12 @@ private:
     uint32_t n_reserved_blocks    = 0;
     uint32_t n_reserved_tokens    = 0;
     bool     has_reservation      = false;
+
+    // Sequence ids with live reservations in the combined table. Shared-KV
+    // always uses this representation when reserve_seq is available, including
+    // batches containing only one sequence, so addressing never changes as
+    // concurrency changes.
+    std::unordered_set<llama_seq_id> reserved_seq_ids;
 
     // Prefix-cache state — valid only when pool->reserve_prefix != nullptr.
     uint32_t              n_prefix_hits = 0;  // leading logical blocks from cache
