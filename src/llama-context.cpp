@@ -3802,3 +3802,23 @@ void llama_opt_epoch(
 llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx) {
     return ctx->memory_breakdown();
 }
+
+void llama_context_sched_reserve(llama_context * ctx) {
+    ctx->sched_reserve();
+}
+
+uint64_t llama_context_device_compute_memory(const llama_context * ctx, int32_t device_index) {
+    const llama_model & model = ctx->get_model();
+    if (device_index < 0 || device_index >= (int32_t) model.devices.size()) {
+        return 0;
+    }
+
+    const ggml_backend_dev_t target = model.devices[device_index].dev;
+    uint64_t bytes = 0;
+    for (const auto & [buft, data] : ctx->memory_breakdown()) {
+        if (ggml_backend_buft_get_device(buft) == target) {
+            bytes += data.compute;
+        }
+    }
+    return bytes;
+}

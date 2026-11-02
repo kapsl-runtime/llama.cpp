@@ -747,6 +747,19 @@ extern "C" {
     // Returns the backend device name for a model-device index, or NULL.
     LLAMA_API const char * llama_model_device_name(const struct llama_model * model, int32_t device_index);
 
+    // Returns the bytes of the context's compute (scheduler graph) buffers on a
+    // device, by the same model-device index as llama_model_device_memory().
+    // This memory is allocated per context on top of the model weights and the
+    // KV cache, and is only final once the scheduler has been reserved
+    // (after context creation). Returns 0 for an invalid index.
+    LLAMA_API uint64_t llama_context_device_compute_memory(const struct llama_context * ctx, int32_t device_index);
+
+    // Performs any pending compute-buffer (scheduler) reservation now instead of
+    // lazily at the next decode. Call after the sampler set is final so that
+    // llama_context_device_compute_memory() reports the steady-state size.
+    // No-op when nothing is pending.
+    LLAMA_API void llama_context_sched_reserve(struct llama_context * ctx);
+
     // Get the default chat template. Returns nullptr if not available
     // If name is NULL, returns the default chat template
     LLAMA_API const char * llama_model_chat_template(const struct llama_model * model, const char * name);
