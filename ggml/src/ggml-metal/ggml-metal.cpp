@@ -682,6 +682,9 @@ static void ggml_backend_metal_device_get_props(ggml_backend_dev_t dev, ggml_bac
         /* .buffer_from_host_ptr = */ true,
         /* .events               = */ true,
     };
+
+    ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
+    props->unified_memory = ggml_metal_device_get_props(ctx_dev)->has_unified_memory;
 }
 
 static ggml_backend_t ggml_backend_metal_device_init_backend(ggml_backend_dev_t dev, const char * params) {

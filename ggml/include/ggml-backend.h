@@ -174,6 +174,9 @@ extern "C" {
         const char * device_id;
         // device capabilities
         struct ggml_backend_dev_caps caps;
+        // true when the device's memory is the host's system memory (CPU, Apple Silicon unified
+        // memory, integrated GPUs); false for dedicated device memory or when the backend does not say
+        bool unified_memory;
     };
 
     GGML_API const char *                  ggml_backend_dev_name(ggml_backend_dev_t device);

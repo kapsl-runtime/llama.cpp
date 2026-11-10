@@ -398,6 +398,7 @@ static void ggml_backend_cpu_device_get_props(ggml_backend_dev_t dev, struct ggm
         /* .buffer_from_host_ptr  = */ true,
         /* .events                = */ false,
     };
+    props->unified_memory = true;
 }
 
 static ggml_backend_t ggml_backend_cpu_device_init_backend(ggml_backend_dev_t dev, const char * params) {

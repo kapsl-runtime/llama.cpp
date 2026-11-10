@@ -3807,6 +3807,47 @@ void llama_context_sched_reserve(llama_context * ctx) {
     ctx->sched_reserve();
 }
 
+uint64_t llama_context_device_context_memory(const llama_context * ctx, int32_t device_index) {
+    const llama_model & model = ctx->get_model();
+    if (device_index < 0 || device_index >= (int32_t) model.devices.size()) {
+        return 0;
+    }
+
+    const ggml_backend_dev_t target = model.devices[device_index].dev;
+    uint64_t bytes = 0;
+    for (const auto & [buft, data] : ctx->memory_breakdown()) {
+        if (ggml_backend_buft_get_device(buft) == target) {
+            bytes += data.context;
+        }
+    }
+    return bytes;
+}
+
+uint64_t llama_context_host_memory(const llama_context * ctx, enum llama_context_memory_kind kind) {
+    const llama_model & model = ctx->get_model();
+    uint64_t bytes = 0;
+    for (const auto & [buft, data] : ctx->memory_breakdown()) {
+        const ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+        bool listed = false;
+        for (const auto & listed_dev : model.devices) {
+            if (listed_dev.dev == dev) {
+                listed = true;
+                break;
+            }
+        }
+        if (listed) {
+            continue;
+        }
+        switch (kind) {
+            case LLAMA_CONTEXT_MEMORY_MODEL:   bytes += data.model;   break;
+            case LLAMA_CONTEXT_MEMORY_CONTEXT: bytes += data.context; break;
+            case LLAMA_CONTEXT_MEMORY_COMPUTE: bytes += data.compute; break;
+            default: return 0;
+        }
+    }
+    return bytes;
+}
+
 uint64_t llama_context_device_compute_memory(const llama_context * ctx, int32_t device_index) {
     const llama_model & model = ctx->get_model();
     if (device_index < 0 || device_index >= (int32_t) model.devices.size()) {

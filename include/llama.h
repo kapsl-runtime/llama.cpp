@@ -754,6 +754,25 @@ extern "C" {
     // (after context creation). Returns 0 for an invalid index.
     LLAMA_API uint64_t llama_context_device_compute_memory(const struct llama_context * ctx, int32_t device_index);
 
+    // Returns the bytes of the context's KV cache / recurrent state buffers that
+    // live on a device, by the same model-device index as llama_model_device_memory().
+    // Placement is per layer, so with partial offload or a multi-device split each
+    // device reports only its own layers. Returns 0 for an invalid index.
+    LLAMA_API uint64_t llama_context_device_context_memory(const struct llama_context * ctx, int32_t device_index);
+
+    enum llama_context_memory_kind {
+        LLAMA_CONTEXT_MEMORY_MODEL   = 0, // model (weights) buffers
+        LLAMA_CONTEXT_MEMORY_CONTEXT = 1, // KV cache / recurrent state buffers
+        LLAMA_CONTEXT_MEMORY_COMPUTE = 2, // compute (scheduler graph) buffers
+    };
+
+    // Returns the bytes of the given kind that are NOT on any device listed by
+    // llama_model_device_memory_count(): host-resident buffers (CPU weights, KV
+    // kept on the CPU by partial offload, pinned host buffers). Together with the
+    // per-device accessors this accounts for every buffer of the context.
+    // Returns 0 for an unknown kind.
+    LLAMA_API uint64_t llama_context_host_memory(const struct llama_context * ctx, enum llama_context_memory_kind kind);
+
     // Performs any pending compute-buffer (scheduler) reservation now instead of
     // lazily at the next decode. Call after the sampler set is final so that
     // llama_context_device_compute_memory() reports the steady-state size.
