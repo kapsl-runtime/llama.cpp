@@ -3807,6 +3807,17 @@ void llama_context_sched_reserve(llama_context * ctx) {
     ctx->sched_reserve();
 }
 
+// A pinned host buffer (for example CUDA_Host) is host RAM, but ggml names a GPU
+// as its device (the CUDA host buffer type always reports CUDA device 0). Counting it
+// per device would charge host memory to that GPU, and only when it is device 0.
+static bool llama_buft_is_pinned_host(ggml_backend_buffer_type_t buft) {
+    if (!ggml_backend_buft_is_host(buft)) {
+        return false;
+    }
+    const ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    return dev != nullptr && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU;
+}
+
 uint64_t llama_context_device_context_memory(const llama_context * ctx, int32_t device_index) {
     const llama_model & model = ctx->get_model();
     if (device_index < 0 || device_index >= (int32_t) model.devices.size()) {
@@ -3816,7 +3827,7 @@ uint64_t llama_context_device_context_memory(const llama_context * ctx, int32_t 
     const ggml_backend_dev_t target = model.devices[device_index].dev;
     uint64_t bytes = 0;
     for (const auto & [buft, data] : ctx->memory_breakdown()) {
-        if (ggml_backend_buft_get_device(buft) == target) {
+        if (ggml_backend_buft_get_device(buft) == target && !llama_buft_is_pinned_host(buft)) {
             bytes += data.context;
         }
     }
@@ -3835,7 +3846,7 @@ uint64_t llama_context_host_memory(const llama_context * ctx, enum llama_context
                 break;
             }
         }
-        if (listed) {
+        if (listed && !llama_buft_is_pinned_host(buft)) {
             continue;
         }
         switch (kind) {
@@ -3857,7 +3868,7 @@ uint64_t llama_context_device_compute_memory(const llama_context * ctx, int32_t 
     const ggml_backend_dev_t target = model.devices[device_index].dev;
     uint64_t bytes = 0;
     for (const auto & [buft, data] : ctx->memory_breakdown()) {
-        if (ggml_backend_buft_get_device(buft) == target) {
+        if (ggml_backend_buft_get_device(buft) == target && !llama_buft_is_pinned_host(buft)) {
             bytes += data.compute;
         }
     }
